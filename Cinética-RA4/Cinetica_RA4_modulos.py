@@ -3,7 +3,7 @@ import multiprocessing as mtp
 import time as tm
 
 
-class CineticaPuntual(object):
+class CnieticaPuntual(object):
     '''
     Simula el núcleo de un reactor utilizando las ecuaciones de la cinética puntual con un grupo de energía de neutrones y 6 grupos de neutrones retardados.
     Parámetros:
