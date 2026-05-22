@@ -1,0 +1,8 @@
+Cosas para hacer
+1- Terminar de entender las ecuaciones que aparecen el código
+2- Adecuar el archivo de configuración para acortar el código. Generar más archivos si hace falta
+2*- Pensar una interfaz gráfica para hacer mas user-friendly la carga de los datos del reactor
+3- Evaluar pasos siguientes:
+    Gráficas y outputs adicionales
+    Análisis en base a datos experimentales
+    etc...
