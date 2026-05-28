@@ -1,0 +1,5 @@
+El que dice OOP_nucleo es la clase que genera un proceso secundario para que todos los cálculos del núcleo corran por otro lado
+
+El que solo dice OOP es una pequeña interfaz gráfica para probar que anduviera el otro
+
+Por ahí también hay uno que traté de hacer con pytorch, que ya viene con algunas cuestiones de paralelización incluidas, pero me parece que igual es medio pesado de correr
