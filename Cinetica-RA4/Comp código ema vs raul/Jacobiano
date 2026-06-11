@@ -1,0 +1,9 @@
+$J = \begin{bmatrix}
+\frac{\rho(n) - \beta}{\Lambda} + \frac{n}{\Lambda} \frac{\partial \rho}{\partial n} & \lambda_1 & \lambda_2 & \lambda_3 & \lambda_4 & \lambda_5 & \lambda_6 \\
+\frac{\beta_1}{\Lambda} & -\lambda_1 & 0 & 0 & 0 & 0 & 0 \\
+\frac{\beta_2}{\Lambda} & 0 & -\lambda_2 & 0 & 0 & 0 & 0 \\
+\frac{\beta_3}{\Lambda} & 0 & 0 & -\lambda_3 & 0 & 0 & 0 \\
+\frac{\beta_4}{\Lambda} & 0 & 0 & 0 & -\lambda_4 & 0 & 0 \\
+\frac{\beta_5}{\Lambda} & 0 & 0 & 0 & 0 & -\lambda_5 & 0 \\
+\frac{\beta_6}{\Lambda} & 0 & 0 & 0 & 0 & 0 & -\lambda_6
+\end{bmatrix}$

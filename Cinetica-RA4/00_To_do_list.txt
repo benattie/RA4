@@ -1,8 +1,5 @@
 Cosas para hacer
-1- Terminar de entender las ecuaciones que aparecen el código
-2- Adecuar el archivo de configuración para acortar el código. Generar más archivos si hace falta
-2*- Pensar una interfaz gráfica para hacer mas user-friendly la carga de los datos del reactor
-3- Evaluar pasos siguientes:
-    Gráficas y outputs adicionales
-    Análisis en base a datos experimentales
-    etc...
+1- Mostrar los resultados de la simulación
+2- Armar para que el archivo de configuración por defecto no se modifique cuando se modifican los parámetros por ventana (abrir un diálogo de "guardar como..."?
+3- Correr lo que me pidió Raúl
+4- Seguir estudiando el tema

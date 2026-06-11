@@ -116,7 +116,7 @@ if __name__ == '__main__':
     para_n = tk.Label(marco_var, text=f"n", width=10)
 
     def funcbot():
-        para_n.config(text=round(nucleo.get_n(),2))
+        para_n.config(text=round(nucleo.get_n(),2)) # esto me da el n(t)
     
     bot = tk.Button(marco_var, text="Veamos...", command=funcbot)
 

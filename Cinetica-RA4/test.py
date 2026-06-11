@@ -1,0 +1,2 @@
+a = {"condiciones iniciales": {"flujo de neutrones": 1091.25, "concentración grupo neutrones retardados": [507140, 1138855, 277082, 221815, 15496, 1139], "paso temporal": 0.001} }
+print(a)
