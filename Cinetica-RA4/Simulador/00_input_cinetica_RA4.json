@@ -2,7 +2,7 @@
     "parámetros físicos RA4": {
         "Beta efectivo": 0.0073,
         "Lambda [s]": 4.7e-05,
-        "lambda_i [s]": [
+        "lambda_i [s^-1]":: [
             0.0127,
             0.0317,
             0.115,
