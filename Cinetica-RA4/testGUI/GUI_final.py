@@ -3,11 +3,14 @@ import json
 import csv
 import os
 import math
+import time
+import queue
+import threading
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QSlider, QLabel,
                              QDialog, QLineEdit, QFileDialog, QFormLayout, QMessageBox,
                              QCheckBox)
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QThread, QTimer, Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -30,7 +33,6 @@ class ConfigDialog(QDialog):
         layout.addRow("Velocidad inicial (v₀):", self.input_v0)
         layout.addRow("Paso de tiempo (Δt):", self.input_dt)
 
-        # Botones de acción
         btn_layout = QHBoxLayout()
         self.btn_save = QPushButton("Guardar y Aplicar")
         self.btn_save.clicked.connect(self.accept)
@@ -67,7 +69,6 @@ class ConstantsDialog(QDialog):
         layout.addRow("Amortiguamiento (b):", self.input_b)
         layout.addRow("Constante elástica (k):", self.input_k)
 
-        # Botones de acción
         btn_layout = QHBoxLayout()
         self.btn_save = QPushButton("Guardar y Aplicar")
         self.btn_save.clicked.connect(self.accept)
@@ -85,11 +86,168 @@ class ConstantsDialog(QDialog):
             QMessageBox.critical(self, "Error", "Por favor ingresa valores numéricos válidos.")
             return self.constants
 
+# --- Hilo Desacoplado: Escritura en Disco por Bloques y Lotes ---
+class DiskWriterThread(QThread):
+    def __init__(self, filename="simulacion_oscilador.csv", block_size=500, parent=None):
+        super().__init__(parent)
+        self.filename = filename
+        self.block_size = block_size
+        self.queue = queue.Queue()
+        self._running = True
+
+    def run(self):
+        buffer = []
+        while self._running or not self.queue.empty():
+            try:
+                # Esperar lote o muestra individual con tiempo limite
+                item = self.queue.get(timeout=0.05)
+                if isinstance(item, list) and len(item) > 0 and isinstance(item[0], list):
+                    buffer.extend(item)
+                else:
+                    buffer.append(item)
+                self.queue.task_done()
+                if len(buffer) >= self.block_size:
+                    self._flush_buffer(buffer)
+                    buffer = []
+            except queue.Empty:
+                if buffer:
+                    self._flush_buffer(buffer)
+                    buffer = []
+        if buffer:
+            self._flush_buffer(buffer)
+            buffer = []
+
+    def _flush_buffer(self, buffer):
+        if not buffer:
+            return
+        try:
+            with open(self.filename, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(buffer)
+        except PermissionError:
+            pass
+
+    def stop(self):
+        self._running = False
+        self.wait()
+
+# --- Hilo Desacoplado: Simulación Física en Tiempo Real (Con Acumulador Temporal) ---
+class SimulationThread(QThread):
+    def __init__(self, writer_queue, config, constants, parent=None):
+        super().__init__(parent)
+        self.writer_queue = writer_queue
+        self.lock = threading.Lock()
+
+        # Parámetros físicos
+        self.m = constants.get("m", 1.0)
+        self.b = constants.get("b", 0.2)
+        self.k = constants.get("k", 5.0)
+        self.dt = config.get("dt", 0.05)
+        self.ext_force = False
+
+        # Estado de la simulación
+        self.t = 0.0
+        self.x = config.get("x0", 5.0)
+        self.v = config.get("v0", 0.0)
+
+        # Buffers de datos para el gráfico
+        self.t_data = []
+        self.x_data = []
+
+        self._running = False
+
+    def update_params(self, m, b, k):
+        with self.lock:
+            self.m = m
+            self.b = b
+            self.k = k
+
+    def set_ext_force(self, enabled):
+        with self.lock:
+            self.ext_force = enabled
+
+    def set_config(self, config):
+        with self.lock:
+            self.dt = config.get("dt", 0.05)
+
+    def reset_state(self, x0, v0):
+        with self.lock:
+            self.t = 0.0
+            self.x = x0
+            self.v = v0
+            self.t_data.clear()
+            self.x_data.clear()
+
+    def get_plot_data(self):
+        with self.lock:
+            return list(self.t_data), list(self.x_data), self.t, self.x
+
+    def run(self):
+        self._running = True
+        last_time = time.perf_counter()
+        accumulator = 0.0
+
+        while self._running:
+            now = time.perf_counter()
+            elapsed = now - last_time
+            last_time = now
+
+            # Evitar desbordamiento ("spiral of death") ante pausas del SO
+            if elapsed > 0.2:
+                elapsed = 0.2
+
+            accumulator += elapsed
+
+            with self.lock:
+                m, b, k = self.m, self.b, self.k
+                dt = self.dt
+                ext_force = self.ext_force
+                x, v, t = self.x, self.v, self.t
+
+            batch_samples = []
+            steps = 0
+            max_steps_per_cycle = 2000
+
+            # Sub-stepping en tiempo real: avanzar la simulación en sincronía exacta 1:1 con el reloj real
+            while accumulator >= dt and steps < max_steps_per_cycle:
+                F_ext = 0.0
+                if ext_force:
+                    F_ext = 1.0 * math.sin(2.0 * math.pi * 60.0 * t)
+
+                a = (-b * v - k * x + F_ext) / m
+                v += a * dt
+                x += v * dt
+                t += dt
+
+                accumulator -= dt
+                steps += 1
+
+                # Guardar el 100% de las muestras para la escritura en disco
+                batch_samples.append([round(t, 6), round(x, 6), round(v, 6), m, b, k])
+
+            if steps > 0:
+                with self.lock:
+                    self.x = x
+                    self.v = v
+                    self.t = t
+                    for sample in batch_samples:
+                        self.t_data.append(sample[0])
+                        self.x_data.append(sample[1])
+
+                self.writer_queue.put(batch_samples)
+
+            # Pequeño ceder de CPU
+            time.sleep(0.001)
+
+    def stop(self):
+        self._running = False
+        self.wait()
+
 # --- Ventana Principal de la Interfaz ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Simulador de Oscilador Armónico Amortiguado (Optimizado)")
+        self.setWindowTitle("Simulador de Oscilador Armónico Amortiguado (Tiempo Real + 60 FPS)")
         self.resize(950, 650)
 
         # Valores por defecto de simulación
@@ -103,30 +261,27 @@ class MainWindow(QMainWindow):
         self.load_config_from_file(self.config_filename, silent=True)
         self.load_constants_from_file(self.constants_filename, silent=True)
 
-        # Parámetros físicos dinámicos (valores iniciales para los sliders)
+        # Parámetros físicos dinámicos
         self.m = self.constants.get("m", 1.0)
         self.b = self.constants.get("b", 0.2)
         self.k = self.constants.get("k", 5.0)
 
-        # Variables de estado de la simulación
-        self.t = 0.0
-        self.x = self.config["x0"]
-        self.v = self.config["v0"]
+        # Crear hilo de escritura en disco
+        self.writer_thread = DiskWriterThread(filename=self.csv_filename, block_size=500, parent=self)
 
-        # Vectores para almacenar datos del gráfico
-        self.t_data = []
-        self.x_data = []
+        # Crear hilo de simulación física en tiempo real
+        self.sim_thread = SimulationThread(self.writer_thread.queue, self.config, self.constants, parent=self)
 
-        # Configuración del Timer para la simulación en tiempo real
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.simulation_step)
+        # Temporizador para la actualización de la gráfica a 60 FPS (16 ms)
+        self.plot_timer = QTimer(self)
+        self.plot_timer.setInterval(16)
+        self.plot_timer.timeout.connect(self.update_plot_60fps)
 
         self.init_ui()
         self.update_ui_from_parameters()
         self.reset_simulation()
 
     def init_ui(self):
-        # Contenedor principal
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
@@ -138,11 +293,10 @@ class MainWindow(QMainWindow):
         self.ax.set_xlabel("Tiempo (s)")
         self.ax.set_ylabel("Posición (x)")
         self.ax.grid(True)
-        
-        # Línea de trazado persistente (en lugar de recrearla con plot en cada iteración)
+
         self.line, = self.ax.plot([], [], label="Posición (x)", color="blue", lw=2)
         self.ax.legend(loc="upper right")
-        
+
         main_layout.addWidget(self.canvas, stretch=3)
 
         # --- Panel Derecho: Controles ---
@@ -151,19 +305,19 @@ class MainWindow(QMainWindow):
         # Sliders y etiquetas
         self.lbl_m = QLabel(f"Masa (m): {self.m:.2f} kg")
         self.slider_m = QSlider(Qt.Orientation.Horizontal)
-        self.slider_m.setRange(1, 100)  # Mapea a 0.1 - 10.0
+        self.slider_m.setRange(1, 100)
         self.slider_m.setValue(int(self.m * 10))
         self.slider_m.valueChanged.connect(self.update_parameters)
 
         self.lbl_b = QLabel(f"Amortiguamiento (b): {self.b:.2f}")
         self.slider_b = QSlider(Qt.Orientation.Horizontal)
-        self.slider_b.setRange(0, 100)  # Mapea a 0.0 - 5.0
+        self.slider_b.setRange(0, 100)
         self.slider_b.setValue(int(self.b * 20))
         self.slider_b.valueChanged.connect(self.update_parameters)
 
         self.lbl_k = QLabel(f"Constante Elástica (k): {self.k:.2f} N/m")
         self.slider_k = QSlider(Qt.Orientation.Horizontal)
-        self.slider_k.setRange(1, 200)  # Mapea a 0.1 - 20.0
+        self.slider_k.setRange(1, 200)
         self.slider_k.setValue(int(self.k * 10))
         self.slider_k.valueChanged.connect(self.update_parameters)
 
@@ -242,8 +396,10 @@ class MainWindow(QMainWindow):
         self.constants["b"] = self.b
         self.constants["k"] = self.k
 
+        if hasattr(self, 'sim_thread'):
+            self.sim_thread.update_params(self.m, self.b, self.k)
+
     def update_ui_from_parameters(self):
-        # Bloquear señales para evitar bucles de actualización y redondeos
         self.slider_m.blockSignals(True)
         self.slider_b.blockSignals(True)
         self.slider_k.blockSignals(True)
@@ -285,11 +441,10 @@ class MainWindow(QMainWindow):
             if filename:
                 self.config = new_config
                 self.save_config_to_file(filename)
-                self.reset_simulation()
             else:
-                # Si se cancela el guardado, aun así aplicamos los cambios en memoria
                 self.config = new_config
-                self.reset_simulation()
+            self.sim_thread.set_config(self.config)
+            self.reset_simulation()
 
     def open_constants_dialog(self):
         dialog = ConstantsDialog(self, self.constants)
@@ -302,16 +457,14 @@ class MainWindow(QMainWindow):
                 self.b = self.constants.get("b", 0.2)
                 self.k = self.constants.get("k", 5.0)
                 self.save_constants_to_file(filename)
-                self.update_ui_from_parameters()
-                self.reset_simulation()
             else:
-                # Si se cancela el guardado, aun así aplicamos los cambios en memoria
                 self.constants = new_constants
                 self.m = self.constants.get("m", 1.0)
                 self.b = self.constants.get("b", 0.2)
                 self.k = self.constants.get("k", 5.0)
-                self.update_ui_from_parameters()
-                self.reset_simulation()
+            self.sim_thread.update_params(self.m, self.b, self.k)
+            self.update_ui_from_parameters()
+            self.reset_simulation()
 
     def save_config_to_file(self, filename):
         try:
@@ -332,13 +485,14 @@ class MainWindow(QMainWindow):
             try:
                 with open(filename, 'r') as f:
                     self.config = json.load(f)
+                if hasattr(self, 'sim_thread'):
+                    self.sim_thread.set_config(self.config)
                 if not silent:
                     QMessageBox.information(self, "Éxito", "Configuración cargada correctamente.")
             except Exception as e:
                 if not silent:
                     QMessageBox.warning(self, "Error", f"Error al leer el archivo de configuración: {e}")
         else:
-            # Si el archivo por defecto no existe, lo creamos con los valores iniciales
             self.save_config_to_file(filename)
 
     def load_constants_from_file(self, filename, silent=False):
@@ -346,13 +500,18 @@ class MainWindow(QMainWindow):
             try:
                 with open(filename, 'r') as f:
                     self.constants = json.load(f)
+                if hasattr(self, 'sim_thread'):
+                    self.sim_thread.update_params(
+                        self.constants.get("m", 1.0),
+                        self.constants.get("b", 0.2),
+                        self.constants.get("k", 5.0)
+                    )
                 if not silent:
                     QMessageBox.information(self, "Éxito", "Constantes cargadas correctamente.")
             except Exception as e:
                 if not silent:
                     QMessageBox.warning(self, "Error", f"Error al leer el archivo de constantes: {e}")
         else:
-            # Si el archivo por defecto no existe, lo creamos con los valores iniciales
             self.save_constants_to_file(filename)
 
     def manual_load_config(self):
@@ -371,10 +530,10 @@ class MainWindow(QMainWindow):
             self.update_ui_from_parameters()
             self.reset_simulation()
 
-    # --- Lógica de la Simulación Física ---
+    # --- Lógica de la Simulación Física y Visualización ---
     def start_simulation(self):
-        # Si el CSV no existe, crearlo con cabeceras
-        if not os.path.exists(self.csv_filename) or self.t == 0.0:
+        t_data, _, _, _ = self.sim_thread.get_plot_data()
+        if not os.path.exists(self.csv_filename) or len(t_data) == 0:
             try:
                 with open(self.csv_filename, 'w', newline='') as f:
                     writer = csv.writer(f)
@@ -383,54 +542,54 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error de archivo", "No se pudo escribir en el CSV. Asegúrese de que no esté abierto en otra aplicación.")
                 return
 
-        # Intervalo del QTimer en milisegundos (sincronizado con el dt de la simulación)
-        interval = int(self.config["dt"] * 1000)
-        self.timer.start(max(1, interval))
+        if not self.writer_thread.isRunning():
+            self.writer_thread.start()
+
+        if not self.sim_thread.isRunning():
+            self.sim_thread.start()
+
+        self.plot_timer.start(16)  # 16 ms => ~60 FPS
 
     def pause_simulation(self):
-        self.timer.stop()
+        self.plot_timer.stop()
+        if self.sim_thread.isRunning():
+            self.sim_thread.stop()
 
     def reset_simulation(self):
-        self.timer.stop()
-        self.t = 0.0
-        self.x = self.config["x0"]
-        self.v = self.config["v0"]
-        self.t_data.clear()
-        self.x_data.clear()
+        self.pause_simulation()
+        self.sim_thread.reset_state(self.config["x0"], self.config["v0"])
 
-        # Limpiar datos de la línea en lugar de limpiar todo el gráfico
         self.line.set_data([], [])
-        
-        # Establecer límites del gráfico de forma limpia
         self.ax.set_xlim(0, 10)
-        
-        # Definir rango dinámico inicial para el eje Y basado en x0
-        self.adjust_y_limits()
-        
+        self.adjust_y_limits_from_data([])
         self.canvas.draw()
 
-    def adjust_y_limits(self):
-        if not self.x_data:
-            margin = max(2.0, abs(self.x) * 0.5)
-            self.ax.set_ylim(self.x - margin, self.x + margin)
+    def adjust_y_limits_from_data(self, x_data):
+        if not x_data:
+            margin = max(2.0, abs(self.config["x0"]) * 0.5)
+            self.ax.set_ylim(self.config["x0"] - margin, self.config["x0"] + margin)
         else:
-            hist_min = min(self.x_data)
-            hist_max = max(self.x_data)
+            hist_min = min(x_data)
+            hist_max = max(x_data)
             margin = max(1.0, (hist_max - hist_min) * 0.1)
             self.ax.set_ylim(hist_min - margin, hist_max + margin)
 
     def update_y_scale(self):
         if self.chk_log_scale.isChecked():
-            # Symmetrical log scale to handle negative, zero, and positive values elegantly
             self.ax.set_yscale('symlog', linthresh=0.1)
         else:
             self.ax.set_yscale('linear')
-        
-        self.adjust_y_limits()
+
+        _, x_data, _, _ = self.sim_thread.get_plot_data()
+        self.adjust_y_limits_from_data(x_data)
         self.canvas.draw()
 
     def check_dt_for_force(self):
-        if self.chk_ext_force.isChecked() and self.config["dt"] >= 0.005:
+        is_checked = self.chk_ext_force.isChecked()
+        if hasattr(self, 'sim_thread'):
+            self.sim_thread.set_ext_force(is_checked)
+
+        if is_checked and self.config["dt"] >= 0.005:
             QMessageBox.warning(
                 self,
                 "Advertencia de Estabilidad Numérica",
@@ -440,48 +599,41 @@ class MainWindow(QMainWindow):
                 f"Δt en un valor menor o igual a 0.001 s en 'Condiciones Iniciales...'."
             )
 
-    def simulation_step(self):
-        dt = self.config["dt"]
+    def update_plot_60fps(self):
+        t_data, x_data, current_t, current_x = self.sim_thread.get_plot_data()
+        if not t_data:
+            return
 
-        # Algoritmo de integración numérica (Euler-Cromer) con opción de fuerza externa
-        F_ext = 0.0
-        if self.chk_ext_force.isChecked():
-            # Fuerza armónica externa de 60 Hz y amplitud máxima 1 N
-            # F(t) = 1.0 * sin(2 * pi * f * t)
-            F_ext = 1.0 * math.sin(2.0 * math.pi * 60.0 * self.t)
+        # Decimación inteligente para mantener la fluidez de Matplotlib a 60 FPS
+        if len(t_data) > 4000:
+            step = len(t_data) // 2000
+            t_plot = t_data[::step]
+            x_plot = x_data[::step]
+        else:
+            t_plot = t_data
+            x_plot = x_data
 
-        a = (-self.b * self.v - self.k * self.x + F_ext) / self.m
-        self.v += a * dt
-        self.x += self.v * dt
-        self.t += dt
-
-        # Guardar en memoria para el gráfico
-        self.t_data.append(self.t)
-        self.x_data.append(self.x)
-
-        # Guardar en tiempo real en el archivo CSV (protegido contra PermissionError)
-        try:
-            with open(self.csv_filename, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([round(self.t, 3), round(self.x, 4), round(self.v, 4), self.m, self.b, self.k])
-        except PermissionError:
-            # Se ignora silenciosamente si el archivo está abierto (evita colapsar el programa)
-            pass
-
-        # Actualizar datos del gráfico de manera eficiente (sin borrar los ejes)
-        self.line.set_data(self.t_data, self.x_data)
+        self.line.set_data(t_plot, x_plot)
 
         # Ajuste dinámico del eje X si excede la vista actual
         x_limit_curr = self.ax.get_xlim()[1]
-        if self.t > x_limit_curr:
-            self.ax.set_xlim(0, self.t + 5)
+        if current_t > x_limit_curr:
+            self.ax.set_xlim(0, current_t + 5)
 
         # Ajuste dinámico del eje Y si la amplitud excede los límites visibles
         y_min, y_max = self.ax.get_ylim()
-        if self.x > y_max or self.x < y_min:
-            self.adjust_y_limits()
+        if current_x > y_max or current_x < y_min:
+            self.adjust_y_limits_from_data(x_plot)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
+
+    def closeEvent(self, event):
+        self.plot_timer.stop()
+        if hasattr(self, 'sim_thread') and self.sim_thread.isRunning():
+            self.sim_thread.stop()
+        if hasattr(self, 'writer_thread') and self.writer_thread.isRunning():
+            self.writer_thread.stop()
+        super().closeEvent(event)
 
 # --- Ejecución de la App ---
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+{
+    "condiciones iniciales": {
+        "densidad de neutrones": 1000.0,
+        "concentraci\u00f3n grupo neutrones retardados": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ],
+        "paso temporal": 0.005
+    }
+}

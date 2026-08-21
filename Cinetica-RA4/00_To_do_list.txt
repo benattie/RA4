@@ -1,5 +1,5 @@
 Cosas para hacer
-1- Mostrar los resultados de la simulación
-2- Armar para que el archivo de configuración por defecto no se modifique cuando se modifican los parámetros por ventana (abrir un diálogo de "guardar como..."?
-3- Correr lo que me pidió Raúl
-4- Seguir estudiando el tema
+1- Correr lo que me pidio Raul
+2- Simular un programa de lógica de control, que con un criterio sencillo me entregue posiciones de las dos barras de control, la posición de la fuente y del núcleo, y que pida al simulador del nucleo el flujo de neutrones
+3- Seguir estudiando el tema
+4- 

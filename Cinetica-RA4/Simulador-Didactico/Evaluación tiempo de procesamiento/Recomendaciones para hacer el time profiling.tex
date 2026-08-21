@@ -1,0 +1,374 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- PAQUETES DE CONFIGURACIÓN ---
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{titlesec}
+
+% --- CONFIGURACIÓN DE COLORES PARA CÓDIGO ---
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.96,0.96,0.96}
+
+% --- ESTILO DE LISTINGS (PYTHON) ---
+\lstdefinestyle{pystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4
+}
+\lstset{style=pystyle, extendedchars=true, literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1 {ñ}{{\~n}}1 {Ó}{{\'O}}1
+}
+
+% --- DATOS DEL DOCUMENTO ---
+\title{\textbf{Manual de Referencia: Profiling y Optimización Multihilo de Simuladores Físicos en Python}}
+\author{Guía Técnica de Desarrollo}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ==============================================================================
+\section{Evaluación y Profiling del Tiempo de Ejecución}
+% ==============================================================================
+Cuando un simulador físico escrito en Python incluye un cálculo numérico (resolución de ODEs), una interfaz gráfica (GUI) y almacenamiento en disco (I/O), es fundamental medir qué porcentaje del tiempo total consume cada componente para detectar cuellos de botella.
+
+\subsection{Medición Directa por Bloques con \texttt{time.perf\_counter()}}
+La forma más precisa para aislar estos bloques dentro del bucle de integración principal consiste en medir el tiempo acumulado con un temporizador de alta resolución del sistema operativo.
+
+\begin{lstlisting}[language=Python, caption={Medición del tiempo por bloques en el bucle principal.}]
+import time
+
+# Acumuladores de tiempo total (en segundos)
+t_sim, t_gui, t_io = 0.0, 0.0, 0.0
+n_pasos = 0
+
+def paso_de_simulacion():
+    global t_sim, t_gui, t_io, n_pasos
+    
+    # 1. Cálculo Numérico
+    t0 = time.perf_counter()
+    estado_nuevo = resolver_ode_paso(estado_actual)
+    t1 = time.perf_counter()
+    t_sim += (t1 - t0)
+    
+    # 2. Escritura en Disco
+    t0 = time.perf_counter()
+    escribir_archivo(estado_nuevo)
+    t1 = time.perf_counter()
+    t_io += (t1 - t0)
+    
+    # 3. Actualización de Interfaz / Gráfico
+    t0 = time.perf_counter()
+    actualizar_grafico_gui(estado_nuevo)
+    t1 = time.perf_counter()
+    t_gui += (t1 - t0)
+    
+    n_pasos += 1
+
+def mostrar_reporte():
+    t_total = t_sim + t_gui + t_io
+    print(f"--- REPORTE DE RENDIMIENTO ({n_pasos} pasos) ---")
+    print(f"Simulación (Cálculo): {t_sim:.4f} s ({t_sim/t_total*100:.1f}%)")
+    print(f"Escritura en Disco:   {t_io:.4f} s ({t_io/t_total*100:.1f}%)")
+    print(f"Interfaz Gráfica:     {t_gui:.4f} s ({t_gui/t_total*100:.1f}%)")
+    print(f"Tiempo Total Medido:  {t_total:.4f} s")
+\end{lstlisting}
+
+\subsection{Profiling Global con \texttt{cProfile} y Visualización}
+Para inspeccionar de manera interna qué llamadas dentro de bibliotecas como Matplotlib, Scipy o la GUI consumen recursos, se ejecuta:
+
+\begin{lstlisting}[language=bash, caption={Uso de cProfile y SnakeViz desde la terminal.}]
+# Generar el archivo de profiling
+python -m cProfile -o resultado.prof tu_programa.py
+
+# Visualizar interactivamente en el navegador
+pip install snakeviz
+snakeviz resultado.prof
+\end{lstlisting}
+
+% ==============================================================================
+\section{Estrategias para Desacoplar Renderizado e I/O}
+% ==============================================================================
+El principio clave para evitar que la GUI y la escritura en disco frenen la simulación es \textbf{desacoplar los tiempos de cada proceso}.
+
+\subsection{Arquitectura Multihilo y Colas Thread-Safe}
+\begin{itemize}
+    \item \textbf{Hilo de Simulación:} Resuelve las ecuaciones diferenciales en un bucle continuo sin pausas.
+    \item \textbf{Hilo Principal (GUI):} Mantiene la respuesta de la interfaz a ~60 FPS consumiendo solo estados recientes.
+    \item \textbf{Hilo de Disco (I/O):} Recibe el 100\% de las muestras y las escribe en bloques.
+    \item \textbf{Colas (\texttt{queue.Queue}):} Permiten la comunicación no bloqueante (\texttt{put\_nowait()}).
+\end{itemize}
+
+\subsection{Optimización de Disco y Gráficos}
+\begin{enumerate}
+    \item \textbf{Escritura en Bloques (\textit{Batching}):} Acumular datos en memoria y volcarlos a disco cada $N$ iteraciones mediante \texttt{writerows()} para minimizar las llamadas al sistema.
+    \item \textbf{Subsampling (Decimación):} Reducir la tasa de actualización de la GUI (ej. enviar a la cola 1 de cada 10 pasos).
+    \item \textbf{Blitting en Matplotlib:} Redibujar únicamente la línea modificada en lugar de recalcular ejes, grillas y etiquetas en cada cuadro.
+\end{enumerate}
+
+\begin{table}[h]
+\centering
+\caption{Resumen de estrategias de optimización.}
+\begin{tabular}{lll}
+\toprule
+\textbf{Técnica} & \textbf{Problema que Resuelve} & \textbf{Impacto Esperado} \\
+\midrule
+Multihilo + \texttt{Queue} & Congelamiento de la simulación & Alto (solver independiente) \\
+\textit{Batching} en I/O & Latencia por llamadas a sistema & Reduce el impacto de I/O a $<$1\% \\
+Blitting / PyQtGraph & Sobrecarga de renderizado de la GPU/CPU & Muy alto (fluidez visual a 60 FPS) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\newpage
+% ==============================================================================
+\section{Implementación Completa: Ejemplo Integrado}
+% ==============================================================================
+El siguiente código implementa un simulador completo en \textbf{PyQt6/PyQt5} utilizando tres hilos de ejecución concurrentes:
+\begin{enumerate}
+    \item \texttt{SimulationWorker} (Cálculo numérico).
+    \item \texttt{DiskWorker} (Escritura en disco con \textit{batching}).
+    \item \texttt{MainWindow} (Hilo principal de la GUI con \textit{Blitting} en Matplotlib).
+\end{enumerate}
+
+\begin{lstlisting}[language=Python, caption={Código completo del simulador desacoplado multihilo.}]
+import sys
+import time
+import csv
+import numpy as np
+from queue import Queue, Empty
+
+from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, 
+                             QVBoxLayout, QHBoxLayout, QPushButton)
+
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+# ==============================================================================
+# 1. HILO DE ESCRITURA EN DISCO (I/O Worker con Batching)
+# ==============================================================================
+class DiskWorker(QThread):
+    def __init__(self, disk_queue: Queue, filename="simulacion_resultados.csv", batch_size=1000):
+        super().__init__()
+        self.disk_queue = disk_queue
+        self.filename = filename
+        self.batch_size = batch_size
+        self.running = False
+
+    def run(self):
+        self.running = True
+        buffer = []
+
+        with open(self.filename, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Tiempo_s", "Posicion_x", "Velocidad_v"])
+
+            while self.running or not self.disk_queue.empty():
+                try:
+                    data = self.disk_queue.get(timeout=0.1)
+                    buffer.append(data)
+                    self.disk_queue.task_done()
+
+                    # Volcado masivo a disco al acumular N elementos
+                    if len(buffer) >= self.batch_size:
+                        writer.writerows(buffer)
+                        buffer.clear()
+
+                except Empty:
+                    continue
+
+            if buffer:
+                writer.writerows(buffer)
+                buffer.clear()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+# ==============================================================================
+# 2. HILO DE SIMULACIÓN (Cálculo Numérico Puro)
+# ==============================================================================
+class SimulationWorker(QThread):
+    def __init__(self, gui_queue: Queue, disk_queue: Queue):
+        super().__init__()
+        self.gui_queue = gui_queue
+        self.disk_queue = disk_queue
+        self.running = False
+
+    def run(self):
+        self.running = True
+        
+        t = 0.0
+        dt = 0.001  
+        x = 1.0     
+        v = 0.0     
+        gamma = 0.1
+        omega0 = 2.0 * np.pi
+
+        step_counter = 0
+
+        while self.running:
+            # Integración numérica (Euler-Cromer)
+            a = -2 * gamma * v - (omega0**2) * x
+            v += a * dt
+            x += v * dt
+            t += dt
+
+            step_counter += 1
+
+            # 1. ENVIAR A DISCO: Se guardan TODOS los pasos
+            try:
+                self.disk_queue.put_nowait((t, x, v))
+            except Exception:
+                pass
+
+            # 2. ENVIAR A GUI: Subsampling (1 de cada 10 pasos)
+            if step_counter % 10 == 0:
+                try:
+                    self.gui_queue.put_nowait((t, x))
+                except Exception:
+                    pass
+
+            time.sleep(0.0001)
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+# ==============================================================================
+# 3. VENTANA PRINCIPAL (GUI y Renderizado con Blitting)
+# ==============================================================================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Simulador Multihilo (Cálculo + GUI + Disco)")
+        self.resize(800, 500)
+
+        self.gui_queue = Queue(maxsize=100)
+        self.disk_queue = Queue(maxsize=50000)
+
+        self.sim_worker = SimulationWorker(self.gui_queue, self.disk_queue)
+        self.disk_worker = DiskWorker(self.disk_queue)
+
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QHBoxLayout(main_widget)
+
+        controls_layout = QVBoxLayout()
+        self.btn_start = QPushButton("Iniciar Simulación")
+        self.btn_start.clicked.connect(self.toggle_simulation)
+        controls_layout.addWidget(self.btn_start)
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        self.fig = Figure(figsize=(6, 4))
+        self.canvas = FigureCanvas(self.fig)
+        layout.addWidget(self.canvas)
+
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_xlim(0, 10)
+        self.ax.set_ylim(-1.5, 1.5)
+        self.ax.set_xlabel("Tiempo (s)")
+        self.ax.set_ylabel("Posición (x)")
+        self.ax.grid(True)
+
+        (self.line,) = self.ax.plot([], [], 'b-', animated=True)
+
+        self.t_data = []
+        self.x_data = []
+        self.background = None
+
+        self.canvas.mpl_connect("draw_event", self.on_draw)
+
+        self.timer = QTimer()
+        self.timer.setInterval(16)  # ~60 FPS
+        self.timer.timeout.connect(self.update_gui)
+
+    def on_draw(self, event):
+        self.background = self.canvas.copy_from_bbox(self.ax.bbox)
+        self.ax.draw_artist(self.line)
+
+    def toggle_simulation(self):
+        if not self.sim_worker.isRunning():
+            self.t_data.clear()
+            self.x_data.clear()
+            
+            self.disk_worker.start()
+            self.sim_worker.start()
+            self.timer.start()
+            
+            self.btn_start.setText("Detener Simulación")
+        else:
+            self.sim_worker.stop()
+            self.disk_worker.stop()
+            self.timer.stop()
+            
+            self.btn_start.setText("Iniciar Simulación")
+
+    def update_gui(self):
+        if self.background is None:
+            return
+
+        updated = False
+        while True:
+            try:
+                t, x = self.gui_queue.get_nowait()
+                self.t_data.append(t)
+                self.x_data.append(x)
+                updated = True
+            except Empty:
+                break
+
+        if updated:
+            if self.t_data[-1] > 10:
+                self.ax.set_xlim(self.t_data[-1] - 10, self.t_data[-1])
+                self.canvas.draw()
+                return
+
+            # Renderizado Blitting
+            self.line.set_data(self.t_data, self.x_data)
+            self.canvas.restore_region(self.background)
+            self.ax.draw_artist(self.line)
+            self.canvas.blit(self.ax.bbox)
+
+    def closeEvent(self, event):
+        self.sim_worker.stop()
+        self.disk_worker.stop()
+        event.accept()
+
+# ==============================================================================
+# 4. PUNTO DE ENTRADA
+# ==============================================================================
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+\end{lstlisting}
+
+\end{document}

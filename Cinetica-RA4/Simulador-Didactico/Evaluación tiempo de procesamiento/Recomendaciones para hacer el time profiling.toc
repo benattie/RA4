@@ -1,0 +1,8 @@
+\babel@toc {spanish}{}\relax 
+\contentsline {section}{\numberline {1}Evaluación y Profiling del Tiempo de Ejecución}{2}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Medición Directa por Bloques con \texttt {time.perf\_counter()}}{2}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Profiling Global con \texttt {cProfile} y Visualización}{2}{subsection.1.2}%
+\contentsline {section}{\numberline {2}Estrategias para Desacoplar Renderizado e I/O}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Arquitectura Multihilo y Colas Thread-Safe}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Optimización de Disco y Gráficos}{3}{subsection.2.2}%
+\contentsline {section}{\numberline {3}Implementación Completa: Ejemplo Integrado}{4}{section.3}%
